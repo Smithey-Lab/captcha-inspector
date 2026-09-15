@@ -28,4 +28,3 @@ t.Outputs={ArtifactBucket:{Value:ref('Assets')},Endpoint:{Condition:'Ready',Valu
 
 await writeFile('infra/captcha-cloudformation.json',JSON.stringify(t,null,2)+'\n');
 console.log('Prepared isolated sandbox stack. Empty CodeKey creates only its private artifact bucket.');
-
