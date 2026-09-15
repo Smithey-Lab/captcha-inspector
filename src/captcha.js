@@ -16,7 +16,14 @@ async function connect(url){
   const attempt=++generation;connection?.disconnect();connection=null;$('sandbox-display').replaceChildren();$('sandbox-view-status').textContent='Connecting live controls...';
   const parsed=new URL(url);if(parsed.protocol!=='https:'||parsed.hostname!=='bedrock-agentcore.us-east-1.amazonaws.com')throw new Error('Unexpected viewer endpoint.');
   const dcv=window.dcv;if(!dcv)throw new Error('Viewer could not load.');
-  dcv.setLogHandler(()=>{});
+  const diagnostics=[];
+  dcv.setLogHandler(({domain,message})=>{
+    if(!/channel|input/i.test(String(domain))||!/created channel|unable to create|not enabled|not available|status update|failed|rejected|not found/i.test(String(message)))return;
+    const safe=String(message).replace(/(?:https?|wss?):\/\/\S+/g,'[endpoint]').replace(/[A-Za-z0-9_=-]{40,}/g,'[redacted]').slice(0,200);
+    diagnostics.push(safe);if(diagnostics.length>8)diagnostics.shift();
+    $('sandbox-display').dataset.diagnostics=diagnostics.join(' | ');
+    console.info('Viewer diagnostic:',safe);
+  });
   const extra=()=>parsed.searchParams;
   const auth=await new Promise((resolve,reject)=>{const timeout=setTimeout(()=>reject(new Error('Viewer connection timed out.')),10000);dcv.authenticate(url,{httpExtraSearchParams:extra,promptCredentials:()=>{clearTimeout(timeout);reject(new Error('Viewer authorization failed.'));},error:()=>{clearTimeout(timeout);reject(new Error('Viewer connection failed.'));},success:(_,sessions)=>{clearTimeout(timeout);resolve(sessions[0]);}});});if(attempt!==generation||!token||Date.now()>=endsAt*1000)return;
   const conn=await dcv.connect({url,sessionId:auth.sessionId,authToken:auth.authToken,divId:'sandbox-display',baseUrl:'/assets/dcv/',enabledChannels:['display','input'],clipboardAutoSync:false,volumeLevel:0,observers:{httpExtraSearchParams:extra,disconnect:()=>{if(attempt!==generation)return;$('sandbox-view-status').textContent='Remote view disconnected. The automatic session timeout still applies.';}}});
