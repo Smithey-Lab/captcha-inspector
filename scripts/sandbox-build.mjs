@@ -1,0 +1,11 @@
+import {build} from 'esbuild';
+import {mkdir,cp,readFile,writeFile} from 'node:fs/promises';
+import {createHash} from 'node:crypto';
+await mkdir('.sandbox-build',{recursive:true});
+await mkdir('infra',{recursive:true});
+await build({entryPoints:['backend/captcha/service.mjs'],outfile:'.sandbox-build/index.js',bundle:true,platform:'node',target:'node24',format:'cjs',external:['playwright-core'],minify:true});
+await cp('node_modules/playwright-core','.sandbox-build/node_modules/playwright-core',{recursive:true});
+await writeFile('.sandbox-build/package.json','{"type":"commonjs"}');
+const policyHash=createHash('sha256').update(await readFile('backend/captcha/browser-policies.json')).digest('hex').slice(0,12);
+await writeFile('infra/sandbox-artifacts.json',JSON.stringify({policyKey:`policies/${policyHash}.json`,browserName:`smithey_lab_captcha_${policyHash}`},null,2));
+console.log('Sandbox controller bundled. Package .sandbox-build contents as sandbox.zip.');
