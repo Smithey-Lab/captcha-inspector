@@ -1,4 +1,5 @@
 import {installViewerProtection,hostChange,readableReport} from './captcha-protection.js';
+import {inputReadiness,viewerAssetBase} from './captcha-input.js';
 const $=id=>document.getElementById(id);
 let endpoint='',token='',endsAt=0,captures=0,report=null,connection=null,clock=null,busy=false,opening=false,liveUrl='',generation=0,nextCapture=0,viewOnly=false;
 const status=(text,error=false)=>{$('sandbox-status').textContent=text;$('sandbox-status').dataset.state=error?'error':'ready';};
@@ -17,26 +18,27 @@ async function connect(url){
   const parsed=new URL(url);if(parsed.protocol!=='https:'||parsed.hostname!=='bedrock-agentcore.us-east-1.amazonaws.com')throw new Error('Unexpected viewer endpoint.');
   const dcv=window.dcv;if(!dcv)throw new Error('Viewer could not load.');
   const diagnostics=[];
-  dcv.setLogHandler(({domain,message})=>{
-    if(!/channel|input/i.test(String(domain))||!/created channel|unable to create|not enabled|not available|status update|failed|rejected|not found/i.test(String(message)))return;
+  dcv.setLogHandler(({domain,message,levelName})=>{
+    if(!['WARN','ERROR'].includes(levelName)&&(!/channel|input/i.test(String(domain))||!/created channel|unable to create|not enabled|not available|status update|failed|rejected|not found/i.test(String(message))))return;
     const safe=String(message).replace(/(?:https?|wss?):\/\/\S+/g,'[endpoint]').replace(/[A-Za-z0-9_=-]{40,}/g,'[redacted]').slice(0,200);
     diagnostics.push(safe);if(diagnostics.length>8)diagnostics.shift();
     $('sandbox-display').dataset.diagnostics=diagnostics.join(' | ');
     console.info('Viewer diagnostic:',safe);
   });
-  const extra=()=>parsed.searchParams;
+  dcv.setLogLevel(dcv.LogLevel.INFO);
+  const extra=()=>parsed.searchParams;
+  const readiness=inputReadiness(text=>{$('sandbox-view-status').textContent=text;},()=>attempt===generation&&!!token&&Date.now()<endsAt*1000);
   const auth=await new Promise((resolve,reject)=>{const timeout=setTimeout(()=>reject(new Error('Viewer connection timed out.')),10000);dcv.authenticate(url,{httpExtraSearchParams:extra,promptCredentials:()=>{clearTimeout(timeout);reject(new Error('Viewer authorization failed.'));},error:()=>{clearTimeout(timeout);reject(new Error('Viewer connection failed.'));},success:(_,sessions)=>{clearTimeout(timeout);resolve(sessions[0]);}});});if(attempt!==generation||!token||Date.now()>=endsAt*1000)return;
-  const conn=await dcv.connect({url,sessionId:auth.sessionId,authToken:auth.authToken,divId:'sandbox-display',baseUrl:'/assets/dcv/',enabledChannels:['display','input'],clipboardAutoSync:false,volumeLevel:0,observers:{httpExtraSearchParams:extra,disconnect:()=>{if(attempt!==generation)return;$('sandbox-view-status').textContent='Remote view disconnected. The automatic session timeout still applies.';}}});
+  const conn=await dcv.connect({url,sessionId:auth.sessionId,authToken:auth.authToken,divId:'sandbox-display',baseUrl:viewerAssetBase(window.location.origin),enabledChannels:['display','input'],clipboardAutoSync:false,volumeLevel:0,observers:{httpExtraSearchParams:extra,featuresUpdate:readiness.changed,disconnect:()=>{if(attempt!==generation)return;$('sandbox-view-status').textContent='Remote view disconnected. The automatic session timeout still applies.';}}});
   if(!conn?.disconnect)throw new Error('Viewer connection failed.');
   if(attempt!==generation||!token||Date.now()>=endsAt*1000){conn.disconnect();return;}
   connection=conn;conn.captureClipboardEvents(false);
   await conn.requestDisplayLayout([{name:'Main Display',rect:{x:0,y:0,width:1280,height:800},primary:true}]).catch(()=>{});
   fit();
-  const inputFeatures=await Promise.all(['mouse','keyboard'].map(async name=>{try{return `${name}: ${(await conn.queryFeature(name)).enabled?'available':'unavailable'}`;}catch{return `${name}: unconfirmed`;}}));
-  if(attempt===generation)$('sandbox-view-status').textContent=`Live view connected — ${inputFeatures.join('; ')}. Click inside the remote page to focus it.`;
+  await readiness.attach(conn);
 }
 async function openSubmitted(){if(!token||opening)return;const current=token;opening=true;controls();status('Opening your submitted URL and checking the page...');try{const data=await request({action:'open',token:current});if(current!==token)return;render(data.report);status(data.report.navigationNote||'Page opened. Interact in the live view, then capture a report.',data.report.pageLoaded===false||data.report.httpStatus>=400);}catch(error){if(current===token)status(error.message,true);}finally{if(current===token){opening=false;controls();}}}
-$('sandbox-form').addEventListener('submit',async event=>{event.preventDefault();if(busy||token)return;busy=true;controls();status('Starting your one-minute browser...');try{const data=await request({action:'start',target:$('sandbox-target').value.trim(),streamFirst:true});token=data.token;liveUrl=data.liveUrl;endsAt=Date.now()/1000+Math.min(60,Math.max(0,data.remainingSeconds||0));captures=0;nextCapture=0;opening=false;$('sandbox-capture').textContent='Capture report (3 left)';$('sandbox-results').hidden=true;$('sandbox-session').hidden=false;fit();$('sandbox-session').scrollIntoView({block:'start',behavior:'instant'});countdown();clock=setInterval(countdown,1000);busy=false;controls();const current=token;connect(liveUrl).catch(error=>{if(current===token)$('sandbox-view-status').textContent=`${error.message} Use Reconnect view to retry within this session.`;});if(data.needsOpen)await openSubmitted();else if(data.report)render(data.report);}catch(error){status(error.message,true);}finally{busy=false;controls();}});
+$('sandbox-form').addEventListener('submit',async event=>{event.preventDefault();if(busy||token)return;busy=true;controls();status('Starting your one-minute browser...');try{const data=await request({action:'start',target:$('sandbox-target').value.trim(),streamFirst:true});token=data.token;liveUrl=data.liveUrl;endsAt=Date.now()/1000+Math.min(60,Math.max(0,data.remainingSeconds||0));captures=0;nextCapture=0;opening=false;$('sandbox-capture').textContent='Capture report (3 left)';$('sandbox-results').hidden=true;$('sandbox-session').hidden=false;fit();$('sandbox-session').scrollIntoView({block:'start',behavior:'instant'});countdown();clock=setInterval(countdown,1000);busy=false;controls();const current=token;connect(liveUrl).catch(error=>{if(current===token)$('sandbox-view-status').textContent=`${error.message} Use Reconnect view to retry within this session.`;});if(data.needsOpen){await new Promise(resolve=>setTimeout(resolve,5000));if(current===token)await openSubmitted();}else if(data.report)render(data.report);}catch(error){status(error.message,true);}finally{busy=false;controls();}});
 $('sandbox-open').addEventListener('click',openSubmitted);
 $('sandbox-reconnect').addEventListener('click',()=>{const current=token;connect(liveUrl).catch(error=>{if(current===token)$('sandbox-view-status').textContent=error.message;});});
 $('sandbox-fullscreen').addEventListener('click',async()=>{try{if(document.fullscreenElement)await document.exitFullscreen();else await $('sandbox-session').requestFullscreen();fit();}catch{status('Full screen is unavailable in this browser.',true);}});
@@ -47,3 +49,5 @@ $('sandbox-export').addEventListener('click',()=>{if(!report)return;const url=UR
 window.addEventListener('pagehide',()=>{connection?.disconnect();if(token&&endpoint)fetch(endpoint,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action:'stop',token}),keepalive:true}).catch(()=>{});});
 controls();
 try{const response=await fetch('/captcha-config.json',{cache:'no-store'});const config=await response.json();if(config.enabled&&config.endpoint){const url=new URL(config.endpoint);if(url.protocol!=='https:'||!url.hostname.endsWith('.execute-api.us-east-1.amazonaws.com'))throw new Error();endpoint=url.href;status('Ready. Session setup uses part of the one-minute allowance.');}else status('The sandbox is being prepared and is not accepting sessions yet.');}catch{status('Availability could not be checked. Please reload later.',true);}controls();
+
+

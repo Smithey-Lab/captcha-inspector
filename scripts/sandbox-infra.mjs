@@ -16,7 +16,7 @@ r.BrowserRole=ready('AWS::IAM::Role',{AssumeRolePolicyDocument:browserTrust,Poli
 r.Browser=ready('AWS::BedrockAgentCore::BrowserCustom',{Name:browserName,NetworkConfiguration:{NetworkMode:'PUBLIC'},RecordingConfig:{Enabled:false},BrowserSigning:{Enabled:false},ExecutionRoleArn:att('BrowserRole'),EnterprisePolicies:[{Location:{Bucket:ref('Assets'),Prefix:policyKey},Type:'MANAGED'}]});
 r.ControllerRole=ready('AWS::IAM::Role',{AssumeRolePolicyDocument:assume('lambda.amazonaws.com'),Policies:[policy('SandboxOnly',[
   {...allow(['dynamodb:GetItem','dynamodb:UpdateItem','dynamodb:PutItem'],att('RateTable')),Condition:{'ForAllValues:StringLike':{'dynamodb:LeadingKeys':['sandbox:*']}}},
-  allow(['bedrock-agentcore:StartBrowserSession','bedrock-agentcore:StopBrowserSession','bedrock-agentcore:ConnectBrowserAutomationStream','bedrock-agentcore:ConnectBrowserLiveViewStream'],att('Browser','BrowserArn'))
+  allow(['bedrock-agentcore:UpdateBrowserStream','bedrock-agentcore:StartBrowserSession','bedrock-agentcore:StopBrowserSession','bedrock-agentcore:ConnectBrowserAutomationStream','bedrock-agentcore:ConnectBrowserLiveViewStream'],att('Browser','BrowserArn'))
 ])]});
 r.Controller=ready('AWS::Lambda::Function',{FunctionName:sub('${AWS::StackName}-controller'),Runtime:'nodejs24.x',Handler:'index.handler',MemorySize:512,Timeout:28,Role:att('ControllerRole'),Code:{S3Bucket:ref('Assets'),S3Key:ref('CodeKey')},Environment:{Variables:{RATE_TABLE:ref('RateTable'),BROWSER_ID:att('Browser','BrowserId'),SANDBOX_ENABLED:ref('Enabled'),ALLOWED_ORIGINS:{'Fn::Join':[',',ref('AllowedOrigins')]}}}});
 r.Api=ready('AWS::ApiGatewayV2::Api',{Name:sub('${AWS::StackName}-api'),ProtocolType:'HTTP',CorsConfiguration:{AllowOrigins:ref('AllowedOrigins'),AllowMethods:['POST'],AllowHeaders:['content-type'],ExposeHeaders:['retry-after'],MaxAge:600}});
@@ -28,3 +28,4 @@ t.Outputs={ArtifactBucket:{Value:ref('Assets')},Endpoint:{Condition:'Ready',Valu
 
 await writeFile('infra/captcha-cloudformation.json',JSON.stringify(t,null,2)+'\n');
 console.log('Prepared isolated sandbox stack. Empty CodeKey creates only its private artifact bucket.');
+

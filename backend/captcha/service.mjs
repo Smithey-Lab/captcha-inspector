@@ -1,7 +1,8 @@
 import {createHash,randomBytes} from 'node:crypto';
 import {DynamoDBClient} from '@aws-sdk/client-dynamodb';
 import {DynamoDBDocumentClient,GetCommand,UpdateCommand,TransactWriteCommand} from '@aws-sdk/lib-dynamodb';
-import {BedrockAgentCoreClient,StartBrowserSessionCommand,StopBrowserSessionCommand} from '@aws-sdk/client-bedrock-agentcore';
+import {BedrockAgentCoreClient,StartBrowserSessionCommand,StopBrowserSessionCommand,UpdateBrowserStreamCommand} from '@aws-sdk/client-bedrock-agentcore';
+import {withAutomation} from './control.mjs';
 import {Browser} from 'bedrock-agentcore/browser';
 import {chromium} from 'playwright-core';
 import checker from '../net-target.cjs';
@@ -43,7 +44,13 @@ async function save(key,fields){
 }
 async function stop(sessionId){if(sessionId)await core.send(new StopBrowserSessionCommand({browserIdentifier:identifier(),sessionId}));}
 // Never return automation credentials or CDP URLs to the visitor.
+async function setStream(sessionId,streamStatus){
+  await core.send(new UpdateBrowserStreamCommand({browserIdentifier:identifier(),sessionId,streamUpdate:{automationStreamUpdate:{streamStatus}}}));
+}
 async function capture(sessionId,target,initial=false){
+  return withAutomation(state=>setStream(sessionId,state),()=>capturePage(sessionId,target,initial));
+}
+async function capturePage(sessionId,target,initial=false){
   const browserClient=new Browser({region:options.region,identifier:identifier()});browserClient.attachSession(sessionId);
   const connection=await browserClient.generateWebSocketUrl();
   const browser=await chromium.connectOverCDP(connection.url,{headers:connection.headers,timeout:7000});
@@ -89,7 +96,7 @@ async function capture(sessionId,target,initial=false){
     if(!pageLoaded){report.level='inconclusive';report.verdict='Website did not load';navigationNote=(navigationNote?navigationNote+' ':'')+'The requested page is not visible. Use Open submitted URL to retry within this session, or stop the browser.';}
     if(httpStatus>=400){report.level='inconclusive';report.verdict=`Website returned HTTP ${httpStatus}`;navigationNote='The website returned an error to the AWS browser. Its response can differ from the page you see on your own network.';}
     let screenshot=null;
-    try{const bytes=await page.screenshot({type:'jpeg',quality:40,timeout:3500,fullPage:false});if(bytes.length<=220000)screenshot=bytes.toString('base64');}catch{/* Optional evidence or diagnostic unavailable; core request continues. */}
+    try{const bytes=await page.screenshot({type:'jpeg',quality:40,timeout:3500,fullPage:false});if(bytes.length<=220000)screenshot=bytes.toString('base64');}catch{/* Optional evidence may be unavailable. */}
     return {...report,pageLoaded,httpStatus,navigationCode,title:snapshot.title,url:snapshot.url,requestedUrl:target,capturedAt:new Date().toISOString(),frameCount:snapshot.frameCount,navigationNote,screenshot};
   }finally{await browser.close();}
 }
@@ -98,6 +105,7 @@ export function createHandler(deps={}){
   const startBrowser=deps.startBrowser||(args=>core.send(new StartBrowserSessionCommand(args)));
   const takeCapture=deps.capture||capture;
   const stopBrowser=deps.stop||stop;
+  const handover=deps.handover||(sessionId=>setStream(sessionId,'DISABLED'));
   const persist=deps.save||save;
   const read=deps.read||(async key=>(await db.send(new GetCommand({TableName:table(),Key:{id:key},ConsistentRead:true}))).Item);
   const clock=deps.now||seconds;
@@ -135,7 +143,7 @@ export function createHandler(deps={}){
         if(!isQuota(error)){await log(key,'limiter_failed',{code:'LIMITER_UNAVAILABLE'});return reply(503,{code:'LIMITER_UNAVAILABLE',message:'The sandbox limit service is unavailable. No browser was started.'});}
         const leaseIndex=member?2:3;
         let leaseUntil;
-        if(error.CancellationReasons?.[leaseIndex]?.Code==='ConditionalCheckFailed')try{leaseUntil=(await read('sandbox:lease'))?.untilTime;}catch{/* Optional evidence or diagnostic unavailable; core request continues. */}
+        if(error.CancellationReasons?.[leaseIndex]?.Code==='ConditionalCheckFailed')try{leaseUntil=(await read('sandbox:lease'))?.untilTime;}catch{/* Optional evidence may be unavailable. */}
         const detail=quotaDetails(error,{member,now,leaseUntil});
         await log(key,'rate_limited',{codes:detail.reasons.map(r=>r.code),retryAt:detail.retryAt});
         return reply(429,detail,{'retry-after':String(Math.max(1,detail.retryAt-now))});
@@ -151,6 +159,8 @@ export function createHandler(deps={}){
         const end=startedAt+LIMITS.seconds;
         stage='save';
         await update(key,{sessionId,target:target.url,endsAt:end,state:'active'});
+        stage='handover';
+        await handover(sessionId);
         stage='capture';
         let report;
         if(!input.streamFirst)try{report=await takeCapture(sessionId,target.url,true);}catch(error){
@@ -193,3 +203,5 @@ export function createHandler(deps={}){
   };
 }
 export const handler=createHandler();
+
+

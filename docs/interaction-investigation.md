@@ -1,11 +1,15 @@
-# Live interaction investigation
+# Remote viewer diagnosis and validation
 
-Status: unresolved. A live video connection must not be treated as proof of working input.
+The DCV SDK strips leading slashes from a relative `baseUrl` and resolves it against the current page. Passing `/assets/dcv/` on `/tools/captcha-inspector/` therefore requested decoder workers under the tool route. The worker failed to load and the picture stopped updating, even while the remote browser accepted input. Use an absolute, same-origin asset URL for both public and member routes.
 
-Two bounded developer sessions on September 15, 2026 reproduced missing mouse/keyboard interaction. One opened a controlled input page successfully; another encountered a failed navigation request while the viewer connected. Initial DCV feature queries reported unconfirmed mouse and keyboard capabilities. Reconnecting near expiry also produced SDK cleanup exceptions. These observations do not yet establish a single root cause.
+The controller now explicitly returns the automation stream to `DISABLED` for human control. Navigation and evidence capture enable automation temporarily and return control in `finally`, including after errors. A failed initial handover stops the new browser and returns no viewer credentials. The additional IAM permission is scoped to its browser resource.
 
-A browser-only compatibility check confirmed that gamepad enumeration, DOMMatrix, keyboard API presence and secure-context detection were available in the tested embedded browser. No remote session was needed for that check.
+The frontend observes asynchronous mouse and keyboard feature changes instead of querying once during startup. Automatic navigation waits five seconds after startup to respect the existing API throttle. Clipboard and file-transfer channels remain disabled. Bounded redacted SDK diagnostics stay in the page and console; they are not uploaded as user records.
 
-The client now retains up to eight redacted input/channel diagnostic messages in the display element's `data-diagnostics` attribute and browser console. This includes input-channel construction failures that earlier logging discarded. Diagnostics remain local to the page; they are not uploaded as user records.
+## Validation on September 15, 2026
 
-Both developer sessions terminated. The temporary network allowance was closed and original usage restored; shared daily/monthly limits and the AWS 60-second timeout were unchanged. Further live testing requires remaining quota or an explicitly approved developer allowance. Do not label the interaction issue fixed until pointer, keyboard and scrolling behavior have been demonstrated through the live viewer.
+- Unit coverage includes handover on success/failure, failed startup cleanup, delayed feature notifications, stale connection suppression, absolute decoder URLs, and existing quota/security checks.
+- The final authorized 60-second session opened a controlled page with HTTP 200. Mouse and keyboard features became ready. After the missing decoder assets were supplied and the same session reconnected, the page appeared and the previously typed `test` text was visible in its remote address bar. This confirms remote focus/keyboard delivery; it is not a full scrolling, touch, or form-control acceptance test.
+- AWS reported that session `TERMINATED` with a 60-second timeout and no active sessions remained. The developer network exception was closed and original usage plus the new start restored. Shared daily/monthly caps were unchanged.
+
+The permanent absolute asset URL removes the need for nested-route asset copies. Further live acceptance coverage should run within existing quotas; do not allocate extra sessions implicitly.
