@@ -29,6 +29,10 @@ This repository contains this tool only. The parent website, login/admin portal,
 
 ## Limits and records
 
+The viewer retains up to four selectable reports in tab memory, with capture timestamps and exports for the selected report. Clear individual reports or all local evidence, including the displayed screenshot. Clearing does not reset capture allowances, stop a session, or delete server audit records. Nothing is saved to browser storage.
+
+Viewer connection begins while the browser starts. Manual actions wait for startup, duplicate reconnects are blocked, and Stop remains available during evidence capture. Offline lifecycle tests cover startup timing, stop during capture, stale responses and evidence clearing; these tests do not verify a real remote input channel.
+
 The default limits are 60 seconds per session, one global admission lease, five starts per UTC day, 100 per UTC month and two starts per public network per day. Failed starts count. The optional trusted member integration can bypass the network allowance, but never the global limits. Additional evidence captures are limited and spaced apart.
 
 Admission records and bounded audit events expire using DynamoDB TTL (deletion is asynchronous). Records can include submitted host/path, query parameter names and actor metadata. Query values, raw IPs, signed stream URLs and page contents are excluded from audit events. Session state briefly retains the submitted URL. Paths themselves can contain sensitive information. There is no admin log viewer in this standalone repository.
