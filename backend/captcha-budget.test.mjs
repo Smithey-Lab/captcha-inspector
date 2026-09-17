@@ -29,3 +29,9 @@ test('trusted member duration drives provider expiry, signed view, record and re
  assert.equal(result.statusCode,200);assert.equal(calls.start.sessionTimeoutSeconds,240);assert.equal(calls.record.endsAt,1240);assert.equal(calls.signed,240);assert.equal(calls.reservation.seconds,240);
  const publicResult=await handler(base);assert.equal(publicResult.statusCode,200);assert.equal(calls.start.sessionTimeoutSeconds,60);
 });
+
+test('long session lease cannot expire through TTL before provider expiry',()=>{
+ const tx=quotaTransaction({table:'t',network:'n',now:1000,key:'k',member:true,seconds:28800,budget:{dailySeconds:86400,monthlySeconds:90000,maxSessionSeconds:28800,revision:1}});
+ const lease=tx.TransactItems[2].Update.ExpressionAttributeValues;
+ assert.ok(lease[':expires']>lease[':until']);assert.ok(tx.TransactItems[3].Put.Item.expires>lease[':until']);
+});

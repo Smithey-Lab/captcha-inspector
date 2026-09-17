@@ -35,7 +35,7 @@ export function quotaTransaction({table,network,now,key,member=false,seconds=60,
     counter(`sandbox:day:${day}`,LIMITS.daily,now+172800),
     counter(`sandbox:month:${month}`,LIMITS.monthly,now+35*86400),
     ...(!member?[counter(`sandbox:network:${hash(`${day}:${network}`)}`,LIMITS.networkDaily,now+172800)]:[]),
-    {Update:{TableName:table,Key:{id:'sandbox:lease'},UpdateExpression:'SET untilTime = :until, ownerKey = :owner, expires = :expires',ConditionExpression:'attribute_not_exists(untilTime) OR untilTime <= :now',ExpressionAttributeValues:{':until':now+seconds+60,':owner':key,':expires':now+3600,':now':now}}},
+    {Update:{TableName:table,Key:{id:'sandbox:lease'},UpdateExpression:'SET untilTime = :until, ownerKey = :owner, expires = :expires',ConditionExpression:'attribute_not_exists(untilTime) OR untilTime <= :now',ExpressionAttributeValues:{':until':now+seconds+60,':owner':key,':expires':now+seconds+3600,':now':now}}},
     {Put:{TableName:table,Item:{id:key,sourceHash:hash(`${day}:${network}`),createdAt:now,expires:now+seconds+900,state:'starting',captures:0},ConditionExpression:'attribute_not_exists(id)'}},
     ...budgetItems({table,now,seconds,budget})
   ]};
