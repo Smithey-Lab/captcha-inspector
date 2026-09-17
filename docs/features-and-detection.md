@@ -46,3 +46,13 @@ Official integration references: [Google invisible reCAPTCHA](https://developers
 Custom/self-hosted integrations, unseen providers, dynamically inserted widgets, closed shadow roots, iframe body content, image/canvas-only instructions and deferred external scripts can be missed. Known provider URLs and DOM markers can also be imitated. No OCR or full external script execution analysis is performed. URL checks and browser settings are **not a network firewall**; strong interactive-browser network isolation remains unresolved.
 
 AWS references: [finite browser timeout](https://docs.aws.amazon.com/bedrock-agentcore/latest/APIReference/API_StartBrowserSession.html) and [DynamoDB atomic transactions](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis.html). Fixture tests exercise detection, negative/lookalike cases, authorization and quotas without starting paid browser sessions. DeepSeek supplied a bounded source review and provider-detector draft; its suggestions were independently reviewed and tested.
+
+## Browser-local phishing coverage
+
+The September 2026 [Barracuda report](https://blog.barracuda.com/2026/09/09/browser-based-phishing-blob-urls-microsoft-redirects) describes phishing rendered in browser-generated documents after trusted-service redirects. The inspector now flags sign-in forms in blob/data/srcdoc documents and adds supporting Microsoft OAuth redirect and worker observations. A visible blob page is no longer automatically treated as a failed load.
+
+Up to eight current documents are inspected, prioritizing blob/data/srcdoc frames after the main document. Missing and omitted frames are disclosed. Form values, worker source and message payloads are not collected. Normal OAuth, service-worker usage and blob previews alone do not produce a phishing verdict. Existing service-worker bypass is retained, so this is not a faithful replay of every attack stage.
+
+Local Chromium fixtures cover top-level blob pages, opaque sandboxed blob and srcdoc frames, privacy of field values and a benign HTTP login. This is synthetic behavior testing, not confirmation against a live campaign or a guarantee of detecting all variants. Run `node scripts/test-browser-evidence.mjs` with Edge installed, or set `BROWSER_CHANNEL=chrome` for installed Chrome. CI runs the pure fixture tests without launching paid browsers.
+
+See [current cost assumptions](cost-estimate.md).
