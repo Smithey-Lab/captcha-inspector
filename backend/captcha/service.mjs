@@ -8,11 +8,13 @@ import {chromium} from 'playwright-core';
 import checker from '../net-target.cjs';
 import analyzer from './analyze.cjs';
 import {auditWriter} from './audit.mjs';
+import {sealTarget,openTarget} from './target-vault.mjs';
 import {quotaDetails,failureDetails} from './errors.mjs';
+import {DEFAULT_BUDGET,storedBudget,validateBudget,durationFor,budgetItems} from './budget.mjs';
 
 export const LIMITS=Object.freeze({daily:5,monthly:100,networkDaily:2,seconds:60,captures:3,leaseSeconds:120});
 const hash=value=>createHash('sha256').update(value).digest('hex');
-const safeFailure=error=>String(error?.message||'Unknown failure').split('\n')[0].replace(/(?:https?|wss?):\/\/\S+/gi,'[URL]').slice(0,240);
+const safeFailure=error=>failureDetails(error,'service').code;
 const seconds=()=>Math.floor(Date.now()/1000);
 const options={region:process.env.AWS_REGION||'us-east-1',maxAttempts:1,requestHandler:{connectionTimeout:1500,requestTimeout:7000}};
 const db=DynamoDBDocumentClient.from(new DynamoDBClient(options));
@@ -26,15 +28,16 @@ export function parseSandboxTarget(value){
   const submitted=new URL(raw.includes('://')?raw:raw===target.host&&raw.includes(':')?target.origin:`https://${raw}`);
   return {...target,url:target.origin+submitted.pathname+submitted.search+submitted.hash};
 }
-export function quotaTransaction({table,network,now,key,member=false}){
+export function quotaTransaction({table,network,now,key,member=false,seconds=60,budget=DEFAULT_BUDGET}){
   const day=Math.floor(now/86400),month=new Date(now*1000).toISOString().slice(0,7);
   const counter=(id,limit,expires)=>({Update:{TableName:table,Key:{id},UpdateExpression:'SET expires = :expires ADD #n :one',ConditionExpression:'attribute_not_exists(#n) OR #n < :limit',ExpressionAttributeNames:{'#n':'count'},ExpressionAttributeValues:{':expires':expires,':one':1,':limit':limit}}});
   return {TransactItems:[
     counter(`sandbox:day:${day}`,LIMITS.daily,now+172800),
     counter(`sandbox:month:${month}`,LIMITS.monthly,now+35*86400),
     ...(!member?[counter(`sandbox:network:${hash(`${day}:${network}`)}`,LIMITS.networkDaily,now+172800)]:[]),
-    {Update:{TableName:table,Key:{id:'sandbox:lease'},UpdateExpression:'SET untilTime = :until, ownerKey = :owner, expires = :expires',ConditionExpression:'attribute_not_exists(untilTime) OR untilTime <= :now',ExpressionAttributeValues:{':until':now+LIMITS.leaseSeconds,':owner':key,':expires':now+3600,':now':now}}},
-    {Put:{TableName:table,Item:{id:key,sourceHash:hash(`${day}:${network}`),createdAt:now,expires:now+900,state:'starting',captures:0},ConditionExpression:'attribute_not_exists(id)'}}
+    {Update:{TableName:table,Key:{id:'sandbox:lease'},UpdateExpression:'SET untilTime = :until, ownerKey = :owner, expires = :expires',ConditionExpression:'attribute_not_exists(untilTime) OR untilTime <= :now',ExpressionAttributeValues:{':until':now+seconds+60,':owner':key,':expires':now+seconds+3600,':now':now}}},
+    {Put:{TableName:table,Item:{id:key,sourceHash:hash(`${day}:${network}`),createdAt:now,expires:now+seconds+900,state:'starting',captures:0},ConditionExpression:'attribute_not_exists(id)'}},
+    ...budgetItems({table,now,seconds,budget})
   ]};
 }
 export function isQuota(error){return error.name==='TransactionCanceledException'&&error.CancellationReasons?.some(r=>r.Code==='ConditionalCheckFailed');}
@@ -89,12 +92,15 @@ async function capturePage(sessionId,target,initial=false){
       text:(document.body?.innerText||'').slice(0,100001),
       inlineScripts:Array.from(document.scripts).filter(s=>!s.src).slice(0,100).map(s=>s.textContent.slice(0,50000)).join('\n').slice(0,200001),
       scriptUrls:Array.from(document.scripts).filter(s=>s.src).slice(0,100).map(s=>s.src.slice(0,2048)),
+            bodyPresent:!!document.body,
+      frameUrls:Array.from(document.querySelectorAll('iframe[src],frame[src]')).slice(0,100).map(f=>f.src.slice(0,2048)),
+      widgetMarkers:[['grecaptcha','.g-recaptcha'],['h-captcha','.h-captcha'],['cf-turnstile','.cf-turnstile'],['frc-captcha','.frc-captcha'],['altcha-widget','altcha-widget'],['geetest-captcha','.geetest_holder,.geetest_panel']].filter(([,selector])=>document.querySelector(selector)).map(([name])=>name),
       frameCount:document.querySelectorAll('iframe,frame').length
     }));
     const report=analyzer.analyze(snapshot);
-    const pageLoaded=/^https?:\/\//i.test(snapshot.url)&&!!snapshot.text.trim();
+    const pageLoaded=/^https?:\/\//i.test(snapshot.url)&&(!!snapshot.text.trim()||report.providerIndicators.length>0);
     if(!pageLoaded){report.level='inconclusive';report.verdict='Website did not load';navigationNote=(navigationNote?navigationNote+' ':'')+'The requested page is not visible. Use Open submitted URL to retry within this session, or stop the browser.';}
-    if(httpStatus>=400){report.level='inconclusive';report.verdict=`Website returned HTTP ${httpStatus}`;navigationNote='The website returned an error to the AWS browser. Its response can differ from the page you see on your own network.';}
+    if(httpStatus>=400){if(report.level==='inconclusive'&&!report.providerIndicators.length)report.verdict=`Website returned HTTP ${httpStatus}`;navigationNote='The website returned an HTTP error or challenge response. Captured findings still apply; this can differ from your own browser.';}
     let screenshot=null;
     try{const bytes=await page.screenshot({type:'jpeg',quality:40,timeout:3500,fullPage:false});if(bytes.length<=220000)screenshot=bytes.toString('base64');}catch{/* Optional evidence may be unavailable. */}
     return {...report,pageLoaded,httpStatus,navigationCode,title:snapshot.title,url:snapshot.url,requestedUrl:target,capturedAt:new Date().toISOString(),frameCount:snapshot.frameCount,navigationNote,screenshot};
@@ -133,18 +139,35 @@ export function createHandler(deps={}){
     // API payloads put all visitor-controlled fields inside event.body.
     const member=typeof event.memberSub==='string'&&/^[a-f0-9-]{36}$/.test(event.memberSub);
     try{input=JSON.parse(event.isBase64Encoded?Buffer.from(event.body,'base64').toString('utf8'):event.body);network=member?'member:'+event.memberSub:checker.networkKey(event.requestContext.http.sourceIp);}catch{return reply(400,{message:'Invalid request.'});}
-    if(!input||!['start','open','capture','stop'].includes(input.action))return reply(400,{message:'Choose a supported action.'});
+    if(!input||!['start','open','capture','stop','settings'].includes(input.action))return reply(400,{message:'Choose a supported action.'});
+    if(input.action==='settings'){
+      if(!member)return reply(403,{message:'Member access required.'});
+      try{
+        const current=await read('sandbox:settings');
+        if(input.budget!==undefined){
+          if(event.memberAdmin!==true)return reply(403,{message:'Inspector administrator access required.'});
+          const budget=validateBudget(input.budget),revision=current?.revision||0;
+          await db.send(new UpdateCommand({TableName:env.RATE_TABLE,Key:{id:'sandbox:settings'},UpdateExpression:'SET dailySeconds = :daily, monthlySeconds = :monthly, maxSessionSeconds = :max, revision = :next',ConditionExpression:revision?'revision = :revision':'attribute_not_exists(id)',ExpressionAttributeValues:{':daily':budget.dailySeconds,':monthly':budget.monthlySeconds,':max':budget.maxSessionSeconds,':next':revision+1,...(revision?{':revision':revision}:{})}}));
+          return reply(200,{budget:{...budget,revision:revision+1}});
+        }
+        const now=clock(),day=Math.floor(now/86400),month=new Date(now*1000).toISOString().slice(0,7);
+        const [daily,monthly]=await Promise.all([read(`sandbox:seconds:day:${day}`),read(`sandbox:seconds:month:${month}`)]);
+        return reply(200,{budget:storedBudget(current),usage:{dailySeconds:daily?.count||0,monthlySeconds:monthly?.count||0}});
+      }catch{return reply(400,{message:'Budget settings are invalid, unavailable, or changed concurrently. Refresh and retry. Finite limits are required.'});}
+    }
     if(input.action==='start'){
       if(env.SANDBOX_ENABLED!=='true')return reply(503,{message:'The sandbox is paused. Please try later.'});
       let target;try{target=parseSandboxTarget(input.target);}catch(error){return reply(400,{message:error.message});}
+      let budget,sessionSeconds;
+      try{budget=storedBudget(await read('sandbox:settings'));sessionSeconds=durationFor({member,requested:input.sessionSeconds,maxSeconds:member?(event.memberMaxSeconds??60):60,budget});}catch{return reply(400,{message:'Session length exceeds your permission or the shared maximum, or budget settings are unavailable. No browser was started.'});}
       const token=randomBytes(32).toString('hex'),key=`sandbox:session:${hash(token)}`,now=clock();
-      try{await recordSubmission({key,target:target.url,network,now,memberSub:member?event.memberSub:undefined});}catch{return reply(503,{message:'Submission recording is unavailable or its daily limit is reached. No browser was started.'});}
-      try{await reserve({table:env.RATE_TABLE,network,now,key,member});}catch(error){
+      try{await recordSubmission({key,target:target.url,network,now,memberSub:member?event.memberSub:undefined});}catch(error){return isQuota(error)?reply(429,{code:'AUDIT_DAILY_LIMIT',message:'Your submission allowance is used for today. No browser was started.'},{'retry-after':String(86400-now%86400)}):reply(503,{message:'Submission recording is unavailable. No browser was started.'});}
+      try{await reserve({table:env.RATE_TABLE,network,now,key,member,seconds:sessionSeconds,budget});}catch(error){
         if(!isQuota(error)){await log(key,'limiter_failed',{code:'LIMITER_UNAVAILABLE'});return reply(503,{code:'LIMITER_UNAVAILABLE',message:'The sandbox limit service is unavailable. No browser was started.'});}
         const leaseIndex=member?2:3;
         let leaseUntil;
         if(error.CancellationReasons?.[leaseIndex]?.Code==='ConditionalCheckFailed')try{leaseUntil=(await read('sandbox:lease'))?.untilTime;}catch{/* Optional evidence may be unavailable. */}
-        const detail=quotaDetails(error,{member,now,leaseUntil});
+        const detail=quotaDetails(error,{member,now,leaseUntil,timeBudget:true});
         await log(key,'rate_limited',{codes:detail.reasons.map(r=>r.code),retryAt:detail.retryAt});
         return reply(429,detail,{'retry-after':String(Math.max(1,detail.retryAt-now))});
       }
@@ -154,11 +177,11 @@ export function createHandler(deps={}){
         await (deps.resolve||checker.resolveTarget)(target);
         stage='start';
         const startedAt=clock();
-        const session=await startBrowser({browserIdentifier:env.BROWSER_ID,name:'smithey-lab-sandbox',clientToken:hash(token),sessionTimeoutSeconds:LIMITS.seconds,viewPort:{width:1280,height:800}});
+        const session=await startBrowser({browserIdentifier:env.BROWSER_ID,name:'smithey-lab-sandbox',clientToken:hash(token),sessionTimeoutSeconds:sessionSeconds,viewPort:{width:1280,height:800}});
         sessionId=session.sessionId;if(!sessionId)throw new Error('No session');
-        const end=startedAt+LIMITS.seconds;
+        const end=startedAt+sessionSeconds;
         stage='save';
-        await update(key,{sessionId,target:target.url,endsAt:end,state:'active'});
+        await update(key,{sessionId,targetCipher:sealTarget(target.url,token,key),endsAt:end,state:'active'});
         stage='handover';
         await handover(sessionId);
         stage='capture';
@@ -169,13 +192,13 @@ export function createHandler(deps={}){
         }
         stage='sign';
         const client=deps.browserClient?deps.browserClient():new Browser({region:options.region,identifier:env.BROWSER_ID});client.attachSession(sessionId);
-        const liveUrl=await client.generateLiveViewUrl(LIMITS.seconds);
-        return reply(200,{token,target:target.url,endsAt:end,remainingSeconds:Math.max(0,end-clock()),liveUrl,report:report||null,needsOpen:!!input.streamFirst,limits:LIMITS,viewport:{width:1280,height:800}});
+        const liveUrl=await client.generateLiveViewUrl(sessionSeconds);
+        return reply(200,{token,target:target.url,endsAt:end,remainingSeconds:Math.max(0,end-clock()),liveUrl,report:report||null,needsOpen:!!input.streamFirst,limits:{...LIMITS,seconds:sessionSeconds},viewport:{width:1280,height:800}});
       }catch(error){
         if(sessionId)await stopBrowser(sessionId).catch(()=>{});
         // Short operator-only diagnostic, without URLs, headers, stacks or page content.
         const failure=safeFailure(error);
-        await update(key,{state:'failed',failureStage:stage,failureCode:failureDetails(error,stage).code,failure}).catch(()=>{});
+        await update(key,{state:'failed',targetCipher:null,target:null,failureStage:stage,failureCode:failureDetails(error,stage).code,failure}).catch(()=>{});
         return reply(503,{code:failureDetails(error,stage).code,message:failureDetails(error,stage).message+' This start attempt counts toward your allowance. Any created browser expires automatically.'});
       }
     }
@@ -185,21 +208,23 @@ export function createHandler(deps={}){
     if(!record||record.sourceHash!==hash(`${Math.floor(record.createdAt/86400)}:${network}`))return reply(403,{message:'Invalid session.'});
     if(input.action==='stop'){
       if(record.state!=='active')return reply(200,{message:'Session is already closed.'});
-      try{await stopBrowser(record.sessionId);await update(key,{state:'stopped'});return reply(200,{message:'Browser stopped. Your report remains in this tab.'});}catch(error){await log(key,'operation_failed',{stage:'stop',code:failureDetails(error,'stop').code});return reply(503,{code:failureDetails(error,'stop').code,message:failureDetails(error,'stop').message+' The automatic session timeout still applies.'});}
+      try{await stopBrowser(record.sessionId);await update(key,{state:'stopped',targetCipher:null,target:null});return reply(200,{message:'Browser stopped. Your report remains in this tab.'});}catch(error){await log(key,'operation_failed',{stage:'stop',code:failureDetails(error,'stop').code});return reply(503,{code:failureDetails(error,'stop').code,message:failureDetails(error,'stop').message+' The automatic session timeout still applies.'});}
     }
     if(record.state!=='active'||record.endsAt<=clock())return reply(410,{message:'Session expired. The last captured report remains available in this tab.'});
+    let target;
+    try{target=openTarget(record.targetCipher,input.token,key);}catch{return reply(410,{message:'Session target is unavailable. Stop this browser and start a new session.'});}
     if(input.action==='open'){
       try{
         if(deps.reserveOpen)await deps.reserveOpen(key,clock());
         else await db.send(new UpdateCommand({TableName:table(),Key:{id:key},UpdateExpression:'SET operationUntil = :until ADD opens :one',ConditionExpression:'#state = :active AND endsAt > :now AND (attribute_not_exists(opens) OR opens < :limit) AND (attribute_not_exists(operationUntil) OR operationUntil <= :now)',ExpressionAttributeNames:{'#state':'state'},ExpressionAttributeValues:{':active':'active',':now':clock(),':until':clock()+28,':one':1,':limit':2}}));
       }catch{return reply(429,{message:'Opening is already in progress, or both navigation attempts are used. You can still interact with the remote browser.'});}
-      try{const report=await takeCapture(record.sessionId,record.target,true);await log(key,'opened',{pageLoaded:report.pageLoaded===true,httpStatus:report.httpStatus??null,code:report.navigationCode||(report.httpStatus>=400?'HTTP_ERROR':report.pageLoaded?'PAGE_LOADED':'PAGE_NOT_LOADED')});return reply(200,{report});}catch(error){await update(key,{failureStage:'open',failureCode:failureDetails(error,'open').code,failure:safeFailure(error)}).catch(()=>{});return reply(503,{code:failureDetails(error,'open').code,message:failureDetails(error,'open').message+' Use Open submitted URL once more within this session, or stop the browser.'});}finally{await update(key,{operationUntil:clock()}).catch(()=>{});}
+      try{const report=await takeCapture(record.sessionId,target,true);await log(key,'opened',{pageLoaded:report.pageLoaded===true,httpStatus:report.httpStatus??null,code:report.navigationCode||(report.httpStatus>=400?'HTTP_ERROR':report.pageLoaded?'PAGE_LOADED':'PAGE_NOT_LOADED')});return reply(200,{report});}catch(error){await update(key,{failureStage:'open',failureCode:failureDetails(error,'open').code,failure:safeFailure(error)}).catch(()=>{});return reply(503,{code:failureDetails(error,'open').code,message:failureDetails(error,'open').message+' Use Open submitted URL once more within this session, or stop the browser.'});}finally{await update(key,{operationUntil:clock()}).catch(()=>{});}
     }
     try{
       if(deps.reserveCapture)await deps.reserveCapture(key,clock());
       else await db.send(new UpdateCommand({TableName:table(),Key:{id:key},UpdateExpression:'SET nextCapture = :next, operationUntil = :until ADD captures :one',ConditionExpression:'#state = :active AND endsAt > :now AND captures < :limit AND (attribute_not_exists(nextCapture) OR nextCapture <= :now) AND (attribute_not_exists(operationUntil) OR operationUntil <= :now)',ExpressionAttributeNames:{'#state':'state'},ExpressionAttributeValues:{':active':'active',':now':clock(),':next':clock()+20,':until':clock()+28,':one':1,':limit':LIMITS.captures}}));
     }catch{return reply(429,{message:'Report limit reached. Allow 20 seconds between captures; at most three extra captures per session.'});}
-    try{const report=await takeCapture(record.sessionId,record.target);await log(key,'captured',{level:report.level||'inconclusive'});return reply(200,{report});}catch(error){await update(key,{failureStage:'capture',failureCode:failureDetails(error,'capture').code,failure:safeFailure(error)}).catch(()=>{});return reply(503,{code:failureDetails(error,'capture').code,message:failureDetails(error,'capture').message+' Your previous report is unchanged.'});}finally{await update(key,{operationUntil:clock()}).catch(()=>{});}
+    try{const report=await takeCapture(record.sessionId,target);await log(key,'captured',{level:report.level||'inconclusive'});return reply(200,{report});}catch(error){await update(key,{failureStage:'capture',failureCode:failureDetails(error,'capture').code,failure:safeFailure(error)}).catch(()=>{});return reply(503,{code:failureDetails(error,'capture').code,message:failureDetails(error,'capture').message+' Your previous report is unchanged.'});}finally{await update(key,{operationUntil:clock()}).catch(()=>{});}
   };
 }
 export const handler=createHandler();
