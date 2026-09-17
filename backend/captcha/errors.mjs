@@ -1,5 +1,5 @@
 // Public messages and retained diagnostics are allowlisted; never expose raw exceptions.
-export function quotaDetails(error,{member=false,now,leaseUntil}){
+export function quotaDetails(error,{member=false,now,leaseUntil,timeBudget=false}){
   const dayReset=(Math.floor(now/86400)+1)*86400;
   const date=new Date(now*1000),monthReset=Date.UTC(date.getUTCFullYear(),date.getUTCMonth()+1,1)/1000;
   const definitions=[
@@ -8,7 +8,11 @@ export function quotaDetails(error,{member=false,now,leaseUntil}){
     ...(!member?[{code:'NETWORK_DAILY_LIMIT',message:'Your public network has used its 2 browser starts for today.',retryAt:dayReset}]:[]),
     {code:'SESSION_BUSY',message:'The single shared browser slot is occupied or completing its startup reservation.',retryAt:Math.max(now+1,Number.isFinite(leaseUntil)?leaseUntil:now+120)}
   ];
-  const reasons=definitions.filter((_,i)=>error.CancellationReasons?.[i]?.Code==='ConditionalCheckFailed');
+  if(timeBudget)definitions.push(null,
+    {code:'GLOBAL_DAILY_TIME_LIMIT',message:'The shared daily browser-time budget cannot fit this session.',retryAt:dayReset},
+    {code:'GLOBAL_MONTHLY_TIME_LIMIT',message:'The shared monthly browser-time budget cannot fit this session.',retryAt:monthReset},
+    {code:'BUDGET_CHANGED',message:'Budget settings changed during admission. Refresh before trying again.',retryAt:now+1});
+  const reasons=definitions.filter((d,i)=>d&&error.CancellationReasons?.[i]?.Code==='ConditionalCheckFailed');
   if(!reasons.length)return {code:'ADMISSION_CONFLICT',reasons:[],retryAt:now+120,message:'The browser reservation conflicted with another request. No browser was started. Please try again in two minutes.'};
   const retryAt=Math.max(...reasons.map(r=>r.retryAt));
   const reset=new Date(retryAt*1000).toISOString().replace('T',' ').replace('.000Z',' UTC');

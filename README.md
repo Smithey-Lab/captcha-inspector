@@ -35,9 +35,11 @@ Viewer connection begins while the browser starts. Manual actions wait for start
 
 The default limits are 60 seconds per session, one global admission lease, five starts per UTC day, 100 per UTC month and two starts per public network per day. Failed starts count. The optional trusted member integration can bypass the network allowance, but never the global limits. Additional evidence captures are limited and spaced apart.
 
-Admission records and bounded audit events expire using DynamoDB TTL (deletion is asynchronous). Records can include submitted host/path, query parameter names and actor metadata. Query values, raw IPs, signed stream URLs and page contents are excluded from audit events. Session state briefly retains the submitted URL. Paths themselves can contain sensitive information. There is no admin log viewer in this standalone repository.
+Admission records and bounded audit events expire using DynamoDB TTL (deletion is asynchronous). Audit records retain the submitted origin and actor metadata, excluding paths, query names and values, fragments, raw IPs, stream URLs and page contents. Temporary session URLs are encrypted using the visitor's random session token; only its hash is stored. Ciphertext is cleared on stop or terminal startup failure. Public audit admission is limited to 1,000/day and 20/day per network; verified members have independent 100/day audit allowances. Paid browser start caps remain unchanged; new finite time reservations also apply. There is no admin log viewer in this standalone repository.
 
 Rate limits reduce exposure; they are not a hard AWS billing ceiling. API requests, storage and other services can still incur charges. Browser isolation and destination checks are defensive layers, not a complete malware containment guarantee. Do not enter credentials or sensitive information into inspected pages.
+
+See [feature research, detection coverage and finite member/admin controls](docs/features-and-detection.md) for this release and the roadmap.
 
 ## Contributing and security
 
