@@ -11,6 +11,7 @@ import {auditWriter} from './audit.mjs';
 import {sealTarget,openTarget} from './target-vault.mjs';
 import {quotaDetails,failureDetails} from './errors.mjs';
 import {DEFAULT_BUDGET,storedBudget,validateBudget,durationFor,budgetItems} from './budget.mjs';
+import {collectBrowserEvidence,browserFindings,hasLoadedEvidence} from './browser-evidence.mjs';
 
 export const LIMITS=Object.freeze({daily:5,monthly:100,networkDaily:2,seconds:60,captures:3,leaseSeconds:120});
 const hash=value=>createHash('sha256').update(value).digest('hex');
@@ -98,7 +99,13 @@ async function capturePage(sessionId,target,initial=false){
       frameCount:document.querySelectorAll('iframe,frame').length
     }));
     const report=analyzer.analyze(snapshot);
-    const pageLoaded=/^https?:\/\//i.test(snapshot.url)&&(!!snapshot.text.trim()||report.providerIndicators.length>0);
+    const browserEvidence=await collectBrowserEvidence(page,context,target);
+    const behavior=browserFindings(browserEvidence);
+    report.findings.push(...behavior.findings);report.browserEvidence=browserEvidence;
+    if(behavior.suspicious&&report.level!=='high'){report.level='suspicious';report.verdict='Suspicious browser-generated sign-in page';}
+    report.coverage.browserDocuments={seen:browserEvidence.framesSeen,omitted:browserEvidence.framesOmitted,failed:browserEvidence.framesFailed};
+    report.limitations.push('Browser-local sign-in detection uses up to eight current documents. Earlier redirects, worker traffic, message payloads and content that did not render may be missed. Service-worker interception is bypassed; the full attack chain is not replayed.');
+    const pageLoaded=hasLoadedEvidence(snapshot,browserEvidence)||report.providerIndicators.length>0;
     if(!pageLoaded){report.level='inconclusive';report.verdict='Website did not load';navigationNote=(navigationNote?navigationNote+' ':'')+'The requested page is not visible. Use Open submitted URL to retry within this session, or stop the browser.';}
     if(httpStatus>=400){if(report.level==='inconclusive'&&!report.providerIndicators.length)report.verdict=`Website returned HTTP ${httpStatus}`;navigationNote='The website returned an HTTP error or challenge response. Captured findings still apply; this can differ from your own browser.';}
     let screenshot=null;
@@ -228,3 +235,4 @@ export function createHandler(deps={}){
   };
 }
 export const handler=createHandler();
+
