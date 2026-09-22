@@ -17,7 +17,7 @@
     "build:backend": "node scripts/sandbox-build.mjs && node scripts/sandbox-infra.mjs"
   },
   "dependencies": {
-    "@aws-sdk/client-bedrock-agentcore": "3.1131.0",
+    "@aws-sdk/client-bedrock-agentcore": "3.1136.0",
     "@aws-sdk/client-dynamodb": "3.1131.0",
     "@aws-sdk/lib-dynamodb": "3.1131.0",
     "bedrock-agentcore": "0.4.4",
