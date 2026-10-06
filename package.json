@@ -20,7 +20,7 @@
     "@aws-sdk/client-bedrock-agentcore": "3.1131.0",
     "@aws-sdk/client-dynamodb": "3.1131.0",
     "@aws-sdk/lib-dynamodb": "3.1131.0",
-    "bedrock-agentcore": "0.4.4",
+    "bedrock-agentcore": "0.4.5",
     "playwright-core": "1.63.0"
   },
   "devDependencies": {
