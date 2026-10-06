@@ -17,16 +17,16 @@
     "build:backend": "node scripts/sandbox-build.mjs && node scripts/sandbox-infra.mjs"
   },
   "dependencies": {
-    "@aws-sdk/client-bedrock-agentcore": "3.1131.0",
-    "@aws-sdk/client-dynamodb": "3.1131.0",
-    "@aws-sdk/lib-dynamodb": "3.1131.0",
-    "bedrock-agentcore": "0.4.4",
+    "@aws-sdk/client-bedrock-agentcore": "3.1146.0",
+    "@aws-sdk/client-dynamodb": "3.1146.0",
+    "@aws-sdk/lib-dynamodb": "3.1141.0",
+    "bedrock-agentcore": "0.4.5",
     "playwright-core": "1.63.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "esbuild": "0.28.2",
-    "eslint": "^10.10.0",
+    "eslint": "^10.12.0",
     "globals": "^17.12.0"
   }
 }
